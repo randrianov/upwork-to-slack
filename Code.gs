@@ -12,7 +12,6 @@ function sendEmailToSlack() {
     return;
   }
 
-  let label = GmailApp.getUserLabelByName("upwork");
   let subject = "";
   let threadTs = null;
   let isMessageForwarded = false;
@@ -28,7 +27,19 @@ function sendEmailToSlack() {
 
     unreadMessages.forEach((message, index) => {
       emailBody = message.getPlainBody();
-      formattedBody = convertLinksToSlackFormat(cutEmailBody(emailBody));
+
+      formattedBody = cutEmailBody(emailBody);
+      formattedBody = removeLinks(formattedBody);
+      formattedBody = normalizeNewlines(formattedBody);
+      //formattedBody = convertLinksToSlackFormat(cutEmailBody(emailBody));
+      Logger.log(`formattedBody ${formattedBody}`);
+      //Logger.log(`getCharCodes ${getCharCodes(formattedBody)}`);
+
+      if (isDuplicateMessage(formattedBody)) {
+        Logger.log(`Duplicate message detected. Skipping... ${formattedBody}`);
+        message.markRead();
+        return; // Skips to the next iteration
+      }
 
       if (index === 0) {
         threadTs = findSlackMessage(FWR_PREFIX + subject);
@@ -61,27 +72,46 @@ function sendEmailToSlack() {
       }
 
       message.markRead();
+      storeMessageHash(formattedBody);
     });
-
-    //thread.removeLabel(label);
   });
 }
 
 function cutEmailBody(emailBody) {
   let topMessage = extractTopMessage(emailBody);
-  let cutoffText = "Reply: https://www.upwork.com";
-  let index = topMessage.indexOf(cutoffText);
+  let cutoffTextHeader1 = "sent a message";
+  let cutoffTextHeader2 = "Unread message from"
+  let cutoffTextFooter1 = "View on Upwork";
+  let cutoffTextFooter2 = "Reply: https://www.upwork.com";
+  let index;
 
+  index = topMessage.indexOf(cutoffTextHeader1);
+  if (index == -1) {
+    index = topMessage.indexOf(cutoffTextHeader2);
+  }
+
+  if (index !== -1) {
+    // cut off header
+    topMessage = topMessage.substring(index).trim();
+  }
+  
+  index = topMessage.indexOf(cutoffTextFooter1);
+  if (index == -1) {
+    index = topMessage.indexOf(cutoffTextFooter2);
+  }
+  // cut off footer
   return index !== -1 ? topMessage.substring(0, index).trim() : topMessage;
 }
 
 function extractTopMessage(emailBody) {
-  let normalizedBody = emailBody.replace(/\n+/g, " ").replace(/\s+/g, " ");
-  
-  let separatorPattern = /On \w{3}, \d{1,2} \w{3} \d{4} at /i; // reply chain starts with "On Fri, 7 Feb 2025 at 20:15"
-  let match = normalizedBody.match(separatorPattern);
+  let separatorPattern = /On \w{3}, \d{1,2} \w{3,4} \d{4} at /i; // reply chain starts with "On Fri, 7 Feb 2025 at 20:15"
+  let match = emailBody.match(separatorPattern);
 
   return match ? emailBody.substring(0, match.index).trim() : emailBody.trim();
+}
+
+function removeLinks(text) {
+  return text.replace(/(https?:\/\/[^\s]+)/g, "");
 }
 
 function convertLinksToSlackFormat(text) {
@@ -99,7 +129,6 @@ function findSlackMessage(query) {
   });
 
   let json = JSON.parse(response.getContentText());
-  Logger.log("Response: " + json); // Log API response
   return json.ok && json.messages.total > 0 ? json.messages.matches[0].ts : null;
 }
 
@@ -158,4 +187,63 @@ function deleteThreadViaAPI(threadId) {
 
   let response = UrlFetchApp.fetch(url, options);
   Logger.log("Deleted Thread ID: " + threadId + " Response: " + response.getResponseCode());
+}
+
+function generateMessageHash(formattedBody) {
+    let withoutTimeFormattedBody = cutTimeFromBodyForHashing(formattedBody);
+    let noRoomLinkWithoutTimeFormattedBody = cutRoomLink(withoutTimeFormattedBody);
+    Logger.log(`🕒 Removed timestamp: ${withoutTimeFormattedBody}`);
+    return Utilities.base64Encode(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, noRoomLinkWithoutTimeFormattedBody));
+}
+
+function isDuplicateMessage(body) {
+    Logger.log(`\n🔍 isDuplicateMessage message`);
+    Logger.log(`   Body (clipped): ${body}`);
+
+    var cache = CacheService.getScriptCache();
+    var messageHash = generateMessageHash(body);
+    Logger.log(`💾 Storing message hash: ${messageHash}`);
+    return cache.get(messageHash) !== null; // If hash exists, it's a duplicate
+}
+
+function storeMessageHash(body) {
+    var cache = CacheService.getScriptCache();
+    var messageHash = generateMessageHash(body);
+    cache.put(messageHash, "1", 3600); // Store hash for 1 hour (3600 seconds)
+}
+
+
+function cutTimeFromBodyForHashing(body) {
+    var dateTimePattern = /\b\d{1,2}:\d{2}\s*(AM|PM)?\s*[A-Z]*,\s*\d{1,2}\s*[A-Za-z]+\s*\d{4}\b/;
+    // convert 8:09 AM EET, 28 Mar 2025 → 28 Mar 2025, cause same message could have different time (gmail local settings)
+    // Remove only the first match
+    var normalizedBody = body.replace(dateTimePattern, (match) => {
+        Logger.log(`🕒 Removing timestamp: ${match}`);
+        return match.replace(/\b\d{1,2}:\d{2}\s*(AM|PM)?\s*[A-Z]*,\s*/, ""); // Keep only the date
+    });
+
+    return normalizedBody;
+}
+
+// remove room url params after (?) cause they are different depends on user <https://www.upwork.com/ab/messages/rooms/room_ce05a0abc18250a1589ae2fe32b7eb99?companyReference=424277385192652801&app_type=fl&frkscc=qnbKjchprKoz|🔗 Link>
+function cutRoomLink(text) {
+    return text.replace(/<https:\/\/www\.upwork\.com\/ab\/messages\/rooms\/([^?|>]+)[^>]*\|🔗 Link>/g, (match, roomId) => {
+        const cleanedUrl = `https://www.upwork.com/ab/messages/rooms/${roomId}`;
+        Logger.log(`🔗 Converting Upwork link: ${match} → <${cleanedUrl}>`);
+        return `<${cleanedUrl}>`;
+    });
+}
+
+function normalizeNewlines(text) {
+  // Replace all variations of multiple CR/LF into a single \n
+  return text.replace(/(\r\n|\r|\n){2,}/g, '\n');
+}
+
+function getCharCodes(text) {
+  let charCodeString = '';
+  for(let i = 0; i < text.length; i++){
+    let code = text.charCodeAt(i);
+    charCodeString += code + ' ';
+  }
+  return charCodeString;
 }
