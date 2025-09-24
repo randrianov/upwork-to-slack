@@ -25,9 +25,13 @@ function sendEmailToSlack() {
     
     subject = thread.getFirstMessageSubject();
 
+    if (subject == "You received a direct message from a client") {
+          // for direct message make subject unique
+          subject = subject + '-' + thread.getId();
+    }
+
     unreadMessages.forEach((message, index) => {
       emailBody = message.getPlainBody();
-
       formattedBody = cutEmailBody(emailBody);
       formattedBody = removeLinks(formattedBody);
       formattedBody = normalizeNewlines(formattedBody);
@@ -57,7 +61,7 @@ function sendEmailToSlack() {
       if (threadTs) {
         postToSlack(formattedBody, threadTs);
       } else {
-        autoForwardMessage(message.getId());
+        autoForwardMessage(message, subject);
         Logger.log("Email sent to: " + RECIPIENT);
         isMessageForwarded = true;
 
@@ -150,9 +154,7 @@ function postToSlack(text, threadTs) {
   Logger.log("Payload sent: " + text);
 }
 
-function autoForwardMessage(messageId) {
-  let message = GmailApp.getMessageById(messageId);
-  let subject = message.getSubject();
+function autoForwardMessage(message, subject) {
   let body = message.getBody();
 
   let email = `To: ${RECIPIENT}\r\n` +
